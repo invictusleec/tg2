@@ -56,8 +56,8 @@ selected_tags = [tag_map[label] for label in selected_tag_labels]
 # 同步session_state
 st.session_state['selected_tags'] = selected_tags
 
-# 网盘类型筛选
-netdisk_types = ['夸克网盘', '阿里云盘', '百度网盘', '115网盘', '天翼云盘', '123云盘', 'UC网盘', '迅雷']
+# 网盘类型筛选（基于实际数据库中的类型）
+netdisk_types = ['夸克网盘', '百度网盘', '阿里云盘', '天翼云盘', '频道地址']
 selected_netdisks = st.sidebar.multiselect("网盘类型", netdisk_types)
 
 # 关键词模糊搜索（带搜索按钮）
@@ -117,13 +117,24 @@ with Session(engine) as session:
                     Message.source.ilike(pattern),
                 )
             )
-    # 网盘类型在 SQL 侧过滤（无 JSONB：退化为字符串包含）
+    # 网盘类型筛选：由于JSON查询复杂性，先获取所有有链接的消息，然后在Python中过滤
     if selected_netdisks:
-        exprs = [cast(Message.links, String).ilike(f'%"{nd}"%') for nd in selected_netdisks]
-        query = query.filter(or_(*exprs))
+        # 先过滤出有链接的消息
+        query = query.filter(Message.links.isnot(None))
 
-    # 统计总数并计算分页
-    total_count = query.order_by(None).count()
+    # 获取所有符合条件的消息
+    all_messages = query.order_by(Message.timestamp.desc()).all()
+    
+    # 在Python中进行网盘类型过滤
+    if selected_netdisks:
+        filtered_messages = []
+        for msg in all_messages:
+            if isinstance(msg.links, dict) and any(nd in msg.links.keys() for nd in selected_netdisks):
+                filtered_messages.append(msg)
+        all_messages = filtered_messages
+    
+    # 重新计算总数和分页
+    total_count = len(all_messages)
     max_page = (total_count + PAGE_SIZE - 1) // PAGE_SIZE if total_count else 1
     # 校正页码范围
     if page_num < 1:
@@ -131,9 +142,10 @@ with Session(engine) as session:
     if page_num > max_page:
         page_num = max_page
         st.session_state['page_num'] = page_num
-
+    
     start_idx = (page_num - 1) * PAGE_SIZE
-    messages_page = query.order_by(Message.timestamp.desc()).offset(start_idx).limit(PAGE_SIZE).all()
+    end_idx = start_idx + PAGE_SIZE
+    messages_page = all_messages[start_idx:end_idx]
 
 # 显示消息列表（分页后）
 for msg in messages_page:
