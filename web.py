@@ -117,35 +117,45 @@ with Session(engine) as session:
                     Message.source.ilike(pattern),
                 )
             )
-    # 网盘类型筛选：由于JSON查询复杂性，先获取所有有链接的消息，然后在Python中过滤
+    # 网盘类型筛选优化：只有选择了网盘类型时才使用Python过滤
     if selected_netdisks:
         # 先过滤出有链接的消息
         query = query.filter(Message.links.isnot(None))
-
-    # 获取所有符合条件的消息
-    all_messages = query.order_by(Message.timestamp.desc()).all()
-    
-    # 在Python中进行网盘类型过滤
-    if selected_netdisks:
+        # 获取所有符合条件的消息进行Python过滤
+        all_messages = query.order_by(Message.timestamp.desc()).all()
+        
+        # 在Python中进行网盘类型过滤
         filtered_messages = []
         for msg in all_messages:
             if isinstance(msg.links, dict) and any(nd in msg.links.keys() for nd in selected_netdisks):
                 filtered_messages.append(msg)
-        all_messages = filtered_messages
-    
-    # 重新计算总数和分页
-    total_count = len(all_messages)
-    max_page = (total_count + PAGE_SIZE - 1) // PAGE_SIZE if total_count else 1
-    # 校正页码范围
-    if page_num < 1:
-        page_num = 1
-    if page_num > max_page:
-        page_num = max_page
-        st.session_state['page_num'] = page_num
-    
-    start_idx = (page_num - 1) * PAGE_SIZE
-    end_idx = start_idx + PAGE_SIZE
-    messages_page = all_messages[start_idx:end_idx]
+        
+        # 重新计算总数和分页
+        total_count = len(filtered_messages)
+        max_page = (total_count + PAGE_SIZE - 1) // PAGE_SIZE if total_count else 1
+        # 校正页码范围
+        if page_num < 1:
+            page_num = 1
+        if page_num > max_page:
+            page_num = max_page
+            st.session_state['page_num'] = page_num
+        
+        start_idx = (page_num - 1) * PAGE_SIZE
+        end_idx = start_idx + PAGE_SIZE
+        messages_page = filtered_messages[start_idx:end_idx]
+    else:
+        # 没有网盘类型筛选时，直接使用SQL分页，性能更好
+        total_count = query.order_by(None).count()
+        max_page = (total_count + PAGE_SIZE - 1) // PAGE_SIZE if total_count else 1
+        # 校正页码范围
+        if page_num < 1:
+            page_num = 1
+        if page_num > max_page:
+            page_num = max_page
+            st.session_state['page_num'] = page_num
+        
+        start_idx = (page_num - 1) * PAGE_SIZE
+        messages_page = query.order_by(Message.timestamp.desc()).offset(start_idx).limit(PAGE_SIZE).all()
 
 # 显示消息列表（分页后）
 for msg in messages_page:
