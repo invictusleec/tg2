@@ -2,6 +2,9 @@ import os
 from pathlib import Path
 import streamlit as st
 
+# 新增：按需直连数据库读取现有频道，避免首次部署导入 model 失败
+from sqlalchemy import create_engine, text
+
 ENV_PATH = Path(os.environ.get("ENV_FILE", "/data/.env"))
 
 REQUIRED = [
@@ -29,13 +32,31 @@ if ENV_PATH.exists():
         k, v = line.split("=", 1)
         existing[k.strip()] = v.strip()
 
+# 从数据库读取现有频道，作为默认 DEFAULT_CHANNELS（若不可用则回退默认）
+DEFAULT_CHANNELS_DEFAULT = "BaiduCloudDisk,tianyirigeng,Aliyun_4K_Movies"
+try:
+    db_url = os.environ.get("DATABASE_URL") or existing.get("DATABASE_URL")
+    if db_url:
+        eng = create_engine(db_url, pool_pre_ping=True)
+        with eng.connect() as conn:
+            result = conn.execute(text("SELECT username FROM channels"))
+            rows = [r[0] for r in result.fetchall() if r and r[0]]
+            if rows:
+                DEFAULT_CHANNELS_DEFAULT = ",".join(sorted({r.strip() for r in rows if r and r.strip()}))
+except Exception:
+    # 数据库不可用或表未创建时保持回退默认
+    pass
+
 with st.form("setup-form", clear_on_submit=False):
     col1, col2 = st.columns(2)
     with col1:
         TELEGRAM_API_ID = st.text_input("TELEGRAM_API_ID", value=existing.get("TELEGRAM_API_ID", ""))
         TELEGRAM_API_HASH = st.text_input("TELEGRAM_API_HASH", value=existing.get("TELEGRAM_API_HASH", ""))
     with col2:
-        DEFAULT_CHANNELS = st.text_input("DEFAULT_CHANNELS (逗号分隔)", value=existing.get("DEFAULT_CHANNELS", "BaiduCloudDisk,tianyirigeng,Aliyun_4K_Movies"))
+        DEFAULT_CHANNELS = st.text_input(
+            "DEFAULT_CHANNELS (逗号分隔)",
+            value=existing.get("DEFAULT_CHANNELS", DEFAULT_CHANNELS_DEFAULT)
+        )
         RUN_MODE = st.selectbox("RUN_MODE", ["full", "ui"], index=0 if existing.get("RUN_MODE", "full") == "full" else 1)
 
     st.divider()
@@ -81,4 +102,4 @@ missing = [k for k in REQUIRED if not os.environ.get(k, existing.get(k))]
 if missing:
     st.warning("当前仍缺少：" + ", ".join(missing))
 
-st.caption("此页面仅在未完成配置时显示；保存并重启后会自动进入正式应用。")
+st.caption("此页面在 SHOW_SETUP=always 或配置缺失时显示；保存并重启后会按设置运行应用。")
