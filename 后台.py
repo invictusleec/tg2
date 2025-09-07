@@ -6,6 +6,7 @@ import json
 import os
 from config import settings
 import re
+from sqlalchemy.exc import OperationalError
 
 st.set_page_config(page_title="后台管理", page_icon="🔧", layout="wide")
 st.title("后台管理")
@@ -13,23 +14,45 @@ st.title("后台管理")
 # 缓存与分页常量
 @st.cache_data(ttl=300)
 def get_telegram_cfg():
-    with Session(engine) as session:
-        cfg = session.query(TelegramConfig).first()
-        if not cfg:
-            return {"string_session": "", "updated_at": None}
-        return {"string_session": (cfg.string_session or ""), "updated_at": cfg.updated_at}
+    try:
+        with Session(engine) as session:
+            cfg = session.query(TelegramConfig).first()
+            if not cfg:
+                return {"string_session": "", "updated_at": None}
+            return {"string_session": (cfg.string_session or ""), "updated_at": cfg.updated_at}
+    except OperationalError:
+        # 连接断开时清理并返回安全默认值
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+        return {"string_session": "", "updated_at": None}
 
 @st.cache_data(ttl=300)
 def get_credentials():
-    with Session(engine) as session:
-        rows = session.query(Credential).all()
-        return [(c.id, c.api_id, c.api_hash) for c in rows]
+    try:
+        with Session(engine) as session:
+            rows = session.query(Credential).all()
+            return [(c.id, c.api_id, c.api_hash) for c in rows]
+    except OperationalError:
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+        return []
 
 @st.cache_data(ttl=300)
 def get_channels():
-    with Session(engine) as session:
-        rows = session.query(Channel).all()
-        return [(c.id, c.username) for c in rows]
+    try:
+        with Session(engine) as session:
+            rows = session.query(Channel).all()
+            return [(c.id, c.username) for c in rows]
+    except OperationalError:
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+        return []
 
 RULES_PAGE_SIZE = 50
 
@@ -256,7 +279,14 @@ with Session(engine) as session:
         with colL:
             sel_chan = st.selectbox("选择频道", options=chan_list, key="rule_sel_chan")
         with colR:
-            existing = session.query(ChannelRule).filter_by(channel=sel_chan).first()
+            try:
+                existing = session.query(ChannelRule).filter_by(channel=sel_chan).first()
+            except OperationalError:
+                try:
+                    engine.dispose()
+                except Exception:
+                    pass
+                existing = None
             cur_netdisks = existing.exclude_netdisks if existing else []
             cur_keywords = ",".join(existing.exclude_keywords) if (existing and existing.exclude_keywords) else ""
             cur_tags = ",".join(existing.exclude_tags) if (existing and existing.exclude_tags) else ""
@@ -271,53 +301,80 @@ with Session(engine) as session:
             if submitted:
                 kws = [s.strip() for s in ex_keywords.split(',') if s.strip()]
                 tags = [s.strip().lstrip('#') for s in ex_tags.split(',') if s.strip()]
-                if existing:
-                    existing.exclude_netdisks = ex_netdisks
-                    existing.exclude_keywords = kws
-                    existing.exclude_tags = tags
-                    existing.enabled = enabled
-                else:
-                    session.add(ChannelRule(channel=sel_chan, exclude_netdisks=ex_netdisks, exclude_keywords=kws, exclude_tags=tags, enabled=enabled))
-                session.commit()
-                st.success("已保存规则")
-                # 触发规则刷新
+                try:
+                    if existing:
+                        existing.exclude_netdisks = ex_netdisks
+                        existing.exclude_keywords = kws
+                        existing.exclude_tags = tags
+                        existing.enabled = enabled
+                    else:
+                        session.add(ChannelRule(channel=sel_chan, exclude_netdisks=ex_netdisks, exclude_keywords=kws, exclude_tags=tags, enabled=enabled))
+                    session.commit()
+                    st.success("已保存规则")
+                except OperationalError as e:
+                    try:
+                        session.rollback()
+                        engine.dispose()
+                    except Exception:
+                        pass
+                    st.error(f"保存失败：数据库连接错误，请重试。详情：{e}")
+                # 更改后触发刷新
                 try:
                     with open("rules_refresh.flag", "w") as f:
                         f.write("refresh")
                 except Exception as e:
                     st.warning(f"触发规则刷新失败: {e}")
                 st.rerun()
-        # 删除规则
-        if existing and st.button("删除该频道规则"):
-            session.delete(existing)
-            session.commit()
-            try:
-                with open("rules_refresh.flag", "w") as f:
-                    f.write("refresh")
-            except Exception as e:
-                st.warning(f"触发规则刷新失败: {e}")
-            st.success("已删除规则")
-            st.rerun()
 
-        # 展示所有已添加规则及其对应频道（分页）
+        if existing and st.button("删除该频道规则"):
+            try:
+                session.delete(existing)
+                session.commit()
+                try:
+                    with open("rules_refresh.flag", "w") as f:
+                        f.write("refresh")
+                except Exception as e:
+                    st.warning(f"触发规则刷新失败: {e}")
+                st.success("已删除规则")
+                st.rerun()
+            except OperationalError as e:
+                try:
+                    session.rollback()
+                    engine.dispose()
+                except Exception:
+                    pass
+                st.error(f"删除失败：数据库连接错误，请稍后再试。详情：{e}")
+
         st.markdown("---")
         st.subheader("已配置规则列表")
-        # 初始化分页状态
+
+        # 分页（改为 LIMIT+1，避免昂贵的 count()）
         if 'rules_page_num' not in st.session_state:
             st.session_state['rules_page_num'] = 1
         rules_page_num = st.session_state['rules_page_num']
-
-        total_rules = session.query(ChannelRule).count()
-        max_rules_page = (total_rules + RULES_PAGE_SIZE - 1) // RULES_PAGE_SIZE if total_rules else 1
         if rules_page_num < 1:
             rules_page_num = 1
-        if rules_page_num > max_rules_page:
-            rules_page_num = max_rules_page
-            st.session_state['rules_page_num'] = rules_page_num
+            st.session_state['rules_page_num'] = 1
         start_idx = (rules_page_num - 1) * RULES_PAGE_SIZE
-        page_rules = session.query(ChannelRule).order_by(ChannelRule.updated_at.desc()).offset(start_idx).limit(RULES_PAGE_SIZE).all()
 
-        if not total_rules:
+        try:
+            rows = (
+                session.query(ChannelRule)
+                .order_by(ChannelRule.updated_at.desc())
+                .offset(start_idx)
+                .limit(RULES_PAGE_SIZE + 1)
+                .all()
+            )
+        except OperationalError:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
+            rows = []
+        has_next = len(rows) > RULES_PAGE_SIZE
+        page_rules = rows[:RULES_PAGE_SIZE]
+
+        if not page_rules:
             st.caption("暂无规则")
         else:
             for r in page_rules:
@@ -331,44 +388,50 @@ with Session(engine) as session:
                     cols = st.columns([1,1,3])
                     with cols[0]:
                         if st.button("载入编辑", key=f"load_rule_{r.id}"):
-                            # 不直接改写 rule_sel_chan，先写入 pending，下一次渲染前再应用
                             st.session_state['rule_sel_chan_pending'] = r.channel
                             st.rerun()
                     with cols[1]:
                         if st.button("删除", key=f"delete_rule_{r.id}"):
-                            session.delete(r)
-                            session.commit()
                             try:
-                                with open("rules_refresh.flag", "w") as f:
-                                    f.write("refresh")
-                            except Exception as e:
-                                st.warning(f"触发规则刷新失败: {e}")
-                            st.success("已删除该规则")
-                            st.rerun()
+                                session.delete(r)
+                                session.commit()
+                                try:
+                                    with open("rules_refresh.flag", "w") as f:
+                                        f.write("refresh")
+                                except Exception as e:
+                                    st.warning(f"触发规则刷新失败: {e}")
+                                st.success("已删除该规则")
+                                st.rerun()
+                            except OperationalError as e:
+                                try:
+                                    session.rollback()
+                                    engine.dispose()
+                                except Exception:
+                                    pass
+                                st.error(f"删除失败：数据库连接错误，请稍后再试。详情：{e}")
 
-            # 分页控件
             colp1, colp2, colp3 = st.columns([1,2,1])
             with colp1:
                 if st.button('上一页', disabled=rules_page_num==1, key='rules_prev_page'):
                     st.session_state['rules_page_num'] = max(1, rules_page_num-1)
                     st.rerun()
             with colp2:
-                st.markdown(f"<div style='text-align:center;line-height:38px;'>共 {total_rules} 条，当前第 {rules_page_num} / {max_rules_page} 页</div>", unsafe_allow_html=True)
+                hint = "（已到最后一页）" if not has_next else ""
+                st.markdown(f"<div style='text-align:center;line-height:38px;'>当前第 {rules_page_num} 页 {hint}</div>", unsafe_allow_html=True)
             with colp3:
-                if st.button('下一页', disabled=rules_page_num==max_rules_page, key='rules_next_page'):
-                    st.session_state['rules_page_num'] = min(max_rules_page, rules_page_num+1)
+                if st.button('下一页', disabled=(not has_next), key='rules_next_page'):
+                    st.session_state['rules_page_num'] = rules_page_num + 1
                     st.rerun()
 
-# ▶️⏸ 监控开关（无重启）
 st.header("监控运行控制（无重启）")
 CONTROL_FILE = "monitor_control.json"
 
 def read_paused():
     try:
         if os.path.exists(CONTROL_FILE):
-            import json
             with open(CONTROL_FILE, "r", encoding="utf-8") as f:
-                return bool(json.load(f).get("paused", False))
+                obj = json.load(f)
+                return bool(obj.get("paused", False))
     except Exception:
         pass
     return False
@@ -398,7 +461,6 @@ with colr:
 
 st.markdown("---")
 
-# 复用前端/监控的严格网盘白名单与清洗逻辑（后台侧兜底）
 STRICT_NETDISK_PATTERNS = {
     "百度网盘": r"https://pan\.baidu\.com/s/[A-Za-z0-9_-]+(?:\?pwd=[A-Za-z0-9]+)?",
     "夸克网盘": r"https://pan\.quark\.cn/s/[A-Za-z0-9_-]+",

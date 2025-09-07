@@ -5,15 +5,20 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 from sqlalchemy import or_, cast, String
+from sqlalchemy.exc import OperationalError
 import json
 import os
+import math
+
+# 统一在顶部定义分页大小，供后续函数默认参数使用
+PAGE_SIZE = 50
 
 # 初始化session_state用于标签筛选
 if 'selected_tags' not in st.session_state:
     st.session_state['selected_tags'] = []
 
 st.set_page_config(
-    page_title="TG频道监控",
+    page_title="📱 TG频道监控",
     page_icon="📱",
     layout="wide"
 )
@@ -33,8 +38,28 @@ time_range = st.sidebar.selectbox(
 # 标签选择（标签云，显示数量，降序）
 @st.cache_data(ttl=300)
 def get_tag_data():
-    with Session(engine) as session:
-        all_tags = session.query(Message.tags).all()
+    try:
+        with Session(engine) as session:
+            cutoff = datetime.now() - timedelta(days=90)
+            all_tags = (
+                session.query(Message.tags)
+                .filter(Message.timestamp >= cutoff)
+                .limit(200000)
+                .all()
+            )
+    except OperationalError:
+        engine.dispose()
+        try:
+            with Session(engine) as session:
+                cutoff = datetime.now() - timedelta(days=90)
+                all_tags = (
+                    session.query(Message.tags)
+                    .filter(Message.timestamp >= cutoff)
+                    .limit(200000)
+                    .all()
+                )
+        except Exception:
+            all_tags = []
     tag_list = [tag for tags in all_tags for tag in (tags[0] if tags[0] else [])]
     tag_counter = Counter(tag_list)
     tag_items = sorted(tag_counter.items(), key=lambda x: x[1], reverse=True)
@@ -56,9 +81,56 @@ selected_tags = [tag_map[label] for label in selected_tag_labels]
 # 同步session_state
 st.session_state['selected_tags'] = selected_tags
 
-# 网盘类型筛选（基于实际数据库中的类型）
-netdisk_types = ['夸克网盘', '百度网盘', '阿里云盘', '迅雷网盘', 'UC网盘', '115网盘', '123网盘', '天翼云盘', '移动云盘']
-selected_netdisks = st.sidebar.multiselect("网盘类型", netdisk_types)
+# 动态获取网盘类型（近90天，带计数），并允许多选
+@st.cache_data(ttl=300)
+def get_netdisk_data():
+    try:
+        with Session(engine) as session:
+            cutoff = datetime.now() - timedelta(days=90)
+            rows = (
+                session.query(Message.links)
+                .filter(Message.timestamp >= cutoff)
+                .limit(200000)
+                .all()
+            )
+    except OperationalError:
+        engine.dispose()
+        try:
+            with Session(engine) as session:
+                cutoff = datetime.now() - timedelta(days=90)
+                rows = (
+                    session.query(Message.links)
+                    .filter(Message.timestamp >= cutoff)
+                    .limit(200000)
+                    .all()
+                )
+        except Exception:
+            rows = []
+    keys = []
+    for r in rows:
+        links = r[0] if r else None
+        if isinstance(links, dict):
+            keys.extend(list(links.keys()))
+    counter = Counter(keys)
+    items = sorted(counter.items(), key=lambda x: x[1], reverse=True)
+    options = [f"{k} ({v})" for k, v in items]
+    key_map = {f"{k} ({v})": k for k, v in items}
+    return options, key_map, {k: v for k, v in items}
+
+try:
+    netdisk_options, netdisk_map, netdisk_counter = get_netdisk_data()
+except Exception:
+    netdisk_options, netdisk_map, netdisk_counter = [], {}, {}
+
+if 'selected_netdisks' not in st.session_state:
+    st.session_state['selected_netdisks'] = []
+selected_nd_labels = st.sidebar.multiselect(
+    "网盘类型", netdisk_options,
+    default=[f"{nd} ({netdisk_counter[nd]})" for nd in st.session_state['selected_netdisks'] if nd in netdisk_counter]
+)
+selected_netdisks = [netdisk_map[label] for label in selected_nd_labels]
+# 同步session_state
+st.session_state['selected_netdisks'] = selected_netdisks
 
 # 关键词模糊搜索（带搜索按钮）
 if 'search_query' not in st.session_state:
@@ -83,8 +155,55 @@ with col_sb:
 if st.session_state.get('search_query'):
     st.sidebar.caption(f"当前搜索：{st.session_state['search_query']}")
 
-# 分页参数
-PAGE_SIZE = 50
+# 在时间范围选择下方展示“按时间范围估算总页数/总条数”（忽略标签/网盘/关键词过滤，仅基于时间与白名单）
+@st.cache_data(ttl=60)
+def estimate_total_pages_by_time_range(_time_range: str, page_size: int = PAGE_SIZE):
+    def _apply_time_filter(q):
+        if _time_range == "最近24小时":
+            return q.filter(Message.timestamp >= datetime.now() - timedelta(days=1))
+        elif _time_range == "最近7天":
+            return q.filter(Message.timestamp >= datetime.now() - timedelta(days=7))
+        elif _time_range == "最近30天":
+            return q.filter(Message.timestamp >= datetime.now() - timedelta(days=30))
+        return q
+    whitelist_like_local = or_(
+        cast(Message.links, String).ilike('%pan.baidu.com/s/%'),
+        cast(Message.links, String).ilike('%pan.quark.cn/s/%'),
+        cast(Message.links, String).ilike('%aliyundrive.com/s/%'),
+        cast(Message.links, String).ilike('%115.com/s/%'),
+        cast(Message.links, String).ilike('%pan.xunlei.com/s/%'),
+        cast(Message.links, String).ilike('%drive.uc.cn/s/%'),
+        cast(Message.links, String).ilike('%www.123pan.com/s/%'),
+        cast(Message.links, String).ilike('%www.123684.com/s/%'),
+        cast(Message.links, String).ilike('%cloud.189.cn/t/%'),
+        cast(Message.links, String).ilike('%caiyun.139.com/w/i/%'),
+    )
+    try:
+        with Session(engine) as session:
+            base = session.query(Message.id)
+            base = _apply_time_filter(base)
+            base = base.filter(Message.links.isnot(None)).filter(whitelist_like_local)
+            total_count = base.count()
+    except OperationalError:
+        engine.dispose()
+        try:
+            with Session(engine) as session:
+                base = session.query(Message.id)
+                base = _apply_time_filter(base)
+                base = base.filter(Message.links.isnot(None)).filter(whitelist_like_local)
+                total_count = base.count()
+        except Exception:
+            return None, None
+    pages = max(1, math.ceil(total_count / page_size)) if total_count else 1
+    return total_count, pages
+
+_total_count, _total_pages = estimate_total_pages_by_time_range(time_range, PAGE_SIZE)
+if _total_count is not None:
+    st.sidebar.caption(f"按时间范围估算：共 {_total_count} 条，约 {_total_pages} 页")
+else:
+    st.sidebar.caption("按时间范围估算总页数：暂不可用")
+
+# 分页参数（移除重复定义，仅保留页码状态）
 if 'page_num' not in st.session_state:
     st.session_state['page_num'] = 1
 page_num = st.session_state['page_num']
@@ -134,38 +253,46 @@ with Session(engine) as session:
                 )
             )
 
-    # 网盘类型筛选优化：只有选择了网盘类型时才使用Python过滤
+    # 网盘类型：将筛选条件下推到 SQL（避免 Python 侧全量取数）
     if selected_netdisks:
-        # 先获取当前条件下的消息进行Python过滤
-        all_messages = query.order_by(Message.timestamp.desc()).all()
-        
-        filtered_messages = []
-        for msg in all_messages:
-            if isinstance(msg.links, dict) and any(nd in msg.links.keys() for nd in selected_netdisks):
-                filtered_messages.append(msg)
-        
-        total_count = len(filtered_messages)
-        max_page = (total_count + PAGE_SIZE - 1) // PAGE_SIZE if total_count else 1
-        if page_num < 1:
-            page_num = 1
-        if page_num > max_page:
-            page_num = max_page
-            st.session_state['page_num'] = page_num
-        
-        start_idx = (page_num - 1) * PAGE_SIZE
-        end_idx = start_idx + PAGE_SIZE
-        messages_page = filtered_messages[start_idx:end_idx]
-    else:
-        total_count = query.order_by(None).count()
-        max_page = (total_count + PAGE_SIZE - 1) // PAGE_SIZE if total_count else 1
-        if page_num < 1:
-            page_num = 1
-        if page_num > max_page:
-            page_num = max_page
-            st.session_state['page_num'] = page_num
-        
-        start_idx = (page_num - 1) * PAGE_SIZE
-        messages_page = query.order_by(Message.timestamp.desc()).offset(start_idx).limit(PAGE_SIZE).all()
+        # 兼容不同来源的网盘类型名称，优先使用域名模式匹配
+        type_patterns = {
+            '夸克网盘': ['%pan.quark.cn/s/%'],
+            '百度网盘': ['%pan.baidu.com/s/%'],
+            '阿里云盘': ['%aliyundrive.com/s/%', '%www.aliyundrive.com/s/%', '%www.alipan.com/s/%', '%alipan.com/s/%'],
+            '迅雷网盘': ['%pan.xunlei.com/s/%'],
+            'UC网盘': ['%drive.uc.cn/s/%'],
+            '115网盘': ['%115.com/s/%'],
+            '123网盘': ['%www.123pan.com/s/%', '%www.123684.com/s/%'],
+            '天翼云盘': ['%cloud.189.cn/t/%'],
+            '移动云盘': ['%caiyun.139.com/w/i/%'],
+        }
+        nd_filters = []
+        for nd in selected_netdisks:
+            pats = type_patterns.get(nd, [])
+            if pats:
+                nd_filters.append(or_(*[cast(Message.links, String).ilike(p) for p in pats]))
+            # 额外增加对 JSON 文本包含中文键名的兜底匹配
+            nd_filters.append(cast(Message.links, String).ilike(f"%{nd}%"))
+        query = query.filter(or_(*nd_filters))
+
+    # 基于 LIMIT+1 的分页，避免昂贵的 count()
+    if page_num < 1:
+        page_num = 1
+        st.session_state['page_num'] = 1
+    start_idx = (page_num - 1) * PAGE_SIZE
+    try:
+        rows = (
+            query.order_by(Message.timestamp.desc())
+            .offset(start_idx)
+            .limit(PAGE_SIZE + 1)
+            .all()
+        )
+    except OperationalError:
+        engine.dispose()
+        rows = []
+    has_next = len(rows) > PAGE_SIZE
+    messages_page = rows[:PAGE_SIZE]
 
 # 显示消息列表（分页后）
 for msg in messages_page:
@@ -194,18 +321,19 @@ for msg in messages_page:
             st.markdown(tag_html, unsafe_allow_html=True)
 
 # 显示分页信息和跳转控件（按钮和页码信息同一行居中）
-if max_page > 1:
-    col1, col2, col3 = st.columns([1,2,1])
-    with col1:
-        if st.button('上一页', disabled=page_num==1, key='prev_page'):
-            st.session_state['page_num'] = max(1, page_num-1)
-            st.rerun()
-    with col2:
-        st.markdown(f"<div style='text-align:center;line-height:38px;'>共 {total_count} 条，当前第 {page_num} / {max_page} 页</div>", unsafe_allow_html=True)
-    with col3:
-        if st.button('下一页', disabled=page_num==max_page, key='next_page'):
-            st.session_state['page_num'] = min(max_page, page_num+1)
-            st.rerun()
+col1, col2, col3 = st.columns([1,2,1])
+with col1:
+    if st.button('上一页', disabled=page_num==1, key='prev_page'):
+        st.session_state['page_num'] = max(1, page_num-1)
+        st.rerun()
+with col2:
+    hint = "（已到最后一页）" if not has_next else ""
+    extra = f" / 约 {_total_pages} 页（按时间范围）" if _total_pages else ""
+    st.markdown(f"<div style='text-align:center;line-height:38px;'>当前第 {page_num} 页 {hint}{extra}</div>", unsafe_allow_html=True)
+with col3:
+    if st.button('下一页', disabled=(not has_next), key='next_page'):
+        st.session_state['page_num'] = page_num + 1
+        st.rerun()
 
 # 处理点击条目标签筛选
 if 'tag_click' in st.session_state and st.session_state['tag_click']:
@@ -218,9 +346,10 @@ if 'tag_click' in st.session_state and st.session_state['tag_click']:
 
 # 添加自动刷新与说明
 st.empty()
+
+# --- 以下保持不变：自动刷新与 CSS ---
 st.markdown("---")
 
-# 从配置文件读取刷新间隔，默认60秒
 REFRESH_CONFIG = "refresh_config.json"
 
 def get_refresh_interval(default: int = 60) -> int:
@@ -237,30 +366,24 @@ def get_refresh_interval(default: int = 60) -> int:
 interval = get_refresh_interval()
 st.markdown(f"页面每{interval}秒自动刷新一次")
 
-# 交互无阻塞刷新：当筛选或分页变化时，跳过sleep，立即完成本次渲染
 import hashlib as _hashlib
 
-# 仅用于判断筛选是否变化（不含分页），变化时重置到第1页
 _filter_state = {
     'time_range': time_range,
     'selected_tags': sorted(st.session_state.get('selected_tags', [])),
-    'selected_netdisks': sorted(selected_netdisks),
+    'selected_netdisks': sorted(st.session_state.get('selected_netdisks', [])),
     'search_query': st.session_state.get('search_query', ''),
 }
 _filter_sig = _hashlib.md5(json.dumps(_filter_state, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
 _prev_filter_sig = st.session_state.get('filter_sig')
 if _prev_filter_sig != _filter_sig:
-    # 筛选条件发生变化，重置分页并记录签名
     st.session_state['page_num'] = 1
     st.session_state['filter_sig'] = _filter_sig
-    # 本次为交互变更，直接返回（不sleep），让界面立即更新
-    # 注意：Streamlit会在下一次空闲渲染时再进入自动刷新
 else:
-    # 用于判断交互是否发生（含分页在内的任何变化），变化时不sleep
     _ui_state = {
         'time_range': time_range,
         'selected_tags': sorted(st.session_state.get('selected_tags', [])),
-        'selected_netdisks': sorted(selected_netdisks),
+        'selected_netdisks': sorted(st.session_state.get('selected_netdisks', [])),
         'page_num': st.session_state.get('page_num', 1),
         'search_query': st.session_state.get('search_query', ''),
     }
@@ -268,49 +391,17 @@ else:
     _prev_ui_sig = st.session_state.get('ui_sig')
     if _prev_ui_sig != _ui_sig:
         st.session_state['ui_sig'] = _ui_sig
-        # 本次为交互变更，直接返回（不sleep）
     else:
-        # 无交互发生，进入自动拉取模式：sleep后自动重跑
         import time as _time
         _time.sleep(interval)
         st.rerun()
 
-# 添加全局CSS，强力覆盖expander内容区的gap，只保留一处，放在文件最后
-st.markdown("""
+st.markdown(
+    """
     <style>
-    [data-testid=\"stExpander\"] [data-testid=\"stExpanderContent\"] {
-        gap: 0.2rem !important;
-    }
-    div[data-testid=\"stExpanderContent\"] {
-        gap: 0.2rem !important;
-    }
-    [data-testid=\"stExpander\"] * {
-        gap: 0.2rem !important;
-    }
-    .netdisk-tag {
-        display: inline-block;
-        background: #e6f0fa;
-        color: #409eff;
-        border-radius: 12px;
-        padding: 2px 10px;
-        margin: 2px 4px 2px 0;
-        font-size: 13px;
-    }
-    .tag-btn {
-        border:1px solid #222;
-        border-radius:8px;
-        padding:4px 16px;
-        margin:2px 6px 2px 0;
-        font-size:15px;
-        background:#fff;
-        color:#222;
-        display:inline-block;
-        transition: background 0.2s, color 0.2s;
-        cursor: default;
-    }
-    .tag-btn:hover {
-        background: #fff;
-        color: #222;
-    }
+    .tag-btn { display:inline-block; margin: 2px 6px 2px 0; padding: 2px 8px; background:#f1f5f9; border-radius: 12px; color:#0f172a; font-size:12px; }
+    .netdisk-tag { display:inline-block; margin: 2px 6px 2px 0; padding: 2px 8px; background:#ecfeff; border-radius: 12px; color:#155e75; font-size:12px; border:1px solid #a5f3fc; }
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)

@@ -64,8 +64,23 @@ class ChannelRule(Base):
 # 数据库连接配置
 DATABASE_URL = settings.DATABASE_URL
 
-# 创建数据库引擎
-engine = create_engine(DATABASE_URL)
+# 创建数据库引擎（增强：连接保活 + 健康检查 + 资源上限 + 语句超时）
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,           # 取连接前做心跳，自动剔除失效连接
+    pool_recycle=1800,            # 30 分钟回收连接，避免服务端超时
+    pool_size=5,                  # 基础连接数
+    max_overflow=10,              # 允许的额外连接数
+    pool_timeout=30,              # 获取连接等待上限（秒）
+    connect_args={                # TCP keepalive 与语句超时（PostgreSQL/psycopg2）
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+        # 将语句超时设置为 60 秒，避免大查询拖垮前端
+        "options": "-c statement_timeout=60000",
+    },
+)
 
 # 创建所有表
 def create_tables():
