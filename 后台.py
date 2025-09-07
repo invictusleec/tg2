@@ -5,6 +5,7 @@ from datetime import datetime
 import json
 import os
 from config import settings
+import re
 
 st.set_page_config(page_title="后台管理", page_icon="🔧", layout="wide")
 st.title("后台管理")
@@ -396,3 +397,49 @@ with colr:
         st.rerun()
 
 st.markdown("---")
+
+# 复用前端/监控的严格网盘白名单与清洗逻辑（后台侧兜底）
+STRICT_NETDISK_PATTERNS = {
+    "百度网盘": r"https://pan\.baidu\.com/s/[A-Za-z0-9_-]+(?:\?pwd=[A-Za-z0-9]+)?",
+    "夸克网盘": r"https://pan\.quark\.cn/s/[A-Za-z0-9_-]+",
+    "阿里云盘": r"https://www\.aliyundrive\.com/s/[A-Za-z0-9_-]+",
+    "115网盘": r"https://115\.com/s/[A-Za-z0-9_-]+",
+    "迅雷网盘": r"https://pan\.xunlei\.com/s/[A-Za-z0-9_-]+(?:\?pwd=[A-Za-z0-9]+)?(?:#)?",
+    "UC网盘": r"https://drive\.uc\.cn/s/[A-Za-z0-9]+(?:\?public=1)?",
+    "123网盘": r"https://www\.123pan\.com/s/[A-Za-z0-9_-]+(?:\?pwd=[A-Za-z0-9]+)?|https://www\.123684\.com/s/[A-Za-z0-9_-]+(?:\?pwd=[A-Za-z0-9]+)?",
+    "天翼云盘": r"https://cloud\.189\.cn/t/[A-Za-z0-9]+",
+    "移动云盘": r"https://caiyun\.139\.com/w/i/[A-Za-z0-9]+",
+}
+
+_NOISE_LINES = re.compile(r"^(?:[\uD800-\uDBFF\uDC00-\uDFFF\U00010000-\U0010ffff\W]{0,3})\s*(?:来自|来 自|频道|频 道|群组|群 组|投稿|搜资源)\s*[:：].*$", re.IGNORECASE)
+_HANDLE = re.compile(r"@\w+")
+
+def extract_netdisk_links_strict(text: str) -> dict:
+    links = {}
+    for name, pattern in STRICT_NETDISK_PATTERNS.items():
+        m = re.findall(pattern, text or '')
+        if m:
+            links[name] = m[0] if isinstance(m, list) else m
+    return links
+
+def clean_channel_noise(text: str) -> str:
+    lines = [ln for ln in (text or '').split('\n')]
+    cleaned = []
+    for ln in lines:
+        lns = ln.strip()
+        if not lns:
+            continue
+        if _NOISE_LINES.match(lns):
+            continue
+        lns = _HANDLE.sub('', lns)
+        lns = re.sub(r"\s{2,}", " ", lns).strip()
+        if lns:
+            cleaned.append(lns)
+    return '\n'.join(cleaned)
+
+st.info("后台已启用网盘白名单与频道署名清洗兜底：非白名单网盘链接或仅含推广署名的内容不会被写入数据库。")
+# 若此文件存在创建消息的入口，请确保在写入前调用：
+# text = clean_channel_noise(text)
+# links = extract_netdisk_links_strict(text)
+# if not links: st.warning("未检测到白名单网盘链接，已忽略写入")
+# else: 正常构造 Message(...) 并提交

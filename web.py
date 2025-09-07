@@ -57,7 +57,7 @@ selected_tags = [tag_map[label] for label in selected_tag_labels]
 st.session_state['selected_tags'] = selected_tags
 
 # 网盘类型筛选（基于实际数据库中的类型）
-netdisk_types = ['夸克网盘', '百度网盘', '阿里云盘', '天翼云盘', '频道地址']
+netdisk_types = ['夸克网盘', '百度网盘', '阿里云盘', '迅雷网盘', 'UC网盘', '115网盘', '123网盘', '天翼云盘', '移动云盘']
 selected_netdisks = st.sidebar.multiselect("网盘类型", netdisk_types)
 
 # 关键词模糊搜索（带搜索按钮）
@@ -99,6 +99,22 @@ with Session(engine) as session:
         query = query.filter(Message.timestamp >= datetime.now() - timedelta(days=7))
     elif time_range == "最近30天":
         query = query.filter(Message.timestamp >= datetime.now() - timedelta(days=30))
+
+    # 仅展示包含白名单网盘链接的消息（SQL 端粗过滤 + JSON 串匹配）
+    whitelist_like = or_(
+        cast(Message.links, String).ilike('%pan.baidu.com/s/%'),
+        cast(Message.links, String).ilike('%pan.quark.cn/s/%'),
+        cast(Message.links, String).ilike('%aliyundrive.com/s/%'),
+        cast(Message.links, String).ilike('%115.com/s/%'),
+        cast(Message.links, String).ilike('%pan.xunlei.com/s/%'),
+        cast(Message.links, String).ilike('%drive.uc.cn/s/%'),
+        cast(Message.links, String).ilike('%www.123pan.com/s/%'),
+        cast(Message.links, String).ilike('%www.123684.com/s/%'),
+        cast(Message.links, String).ilike('%cloud.189.cn/t/%'),
+        cast(Message.links, String).ilike('%caiyun.139.com/w/i/%'),
+    )
+    query = query.filter(Message.links.isnot(None)).filter(whitelist_like)
+
     # 应用标签过滤
     if selected_tags:
         filters = [Message.tags.any(tag) for tag in selected_tags]
@@ -117,23 +133,19 @@ with Session(engine) as session:
                     Message.source.ilike(pattern),
                 )
             )
+
     # 网盘类型筛选优化：只有选择了网盘类型时才使用Python过滤
     if selected_netdisks:
-        # 先过滤出有链接的消息
-        query = query.filter(Message.links.isnot(None))
-        # 获取所有符合条件的消息进行Python过滤
+        # 先获取当前条件下的消息进行Python过滤
         all_messages = query.order_by(Message.timestamp.desc()).all()
         
-        # 在Python中进行网盘类型过滤
         filtered_messages = []
         for msg in all_messages:
             if isinstance(msg.links, dict) and any(nd in msg.links.keys() for nd in selected_netdisks):
                 filtered_messages.append(msg)
         
-        # 重新计算总数和分页
         total_count = len(filtered_messages)
         max_page = (total_count + PAGE_SIZE - 1) // PAGE_SIZE if total_count else 1
-        # 校正页码范围
         if page_num < 1:
             page_num = 1
         if page_num > max_page:
@@ -144,10 +156,8 @@ with Session(engine) as session:
         end_idx = start_idx + PAGE_SIZE
         messages_page = filtered_messages[start_idx:end_idx]
     else:
-        # 没有网盘类型筛选时，直接使用SQL分页，性能更好
         total_count = query.order_by(None).count()
         max_page = (total_count + PAGE_SIZE - 1) // PAGE_SIZE if total_count else 1
-        # 校正页码范围
         if page_num < 1:
             page_num = 1
         if page_num > max_page:

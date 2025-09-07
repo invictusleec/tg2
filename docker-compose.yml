@@ -1,44 +1,18 @@
-version: "3.8"
+version: '3.8'
 
 services:
-  app:
-    build: .
-    container_name: tg-app
-    restart: unless-stopped
-    env_file:
-      - .env
+  postgres:
+    image: postgres:13
+    container_name: tg_postgres
     environment:
-      # 让 Streamlit 在容器环境中运行
-      - DOCKER_ENV=true
-      # 强制使用外部数据库（你已有的数据库），必须在 .env 中配置 DATABASE_URL
-      - DATABASE_URL=${DATABASE_URL}
-      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
-      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
-      - STRING_SESSION=${STRING_SESSION}
-      - EXPORT_STRING_SESSION=${EXPORT_STRING_SESSION}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - DEFAULT_CHANNELS=${DEFAULT_CHANNELS}
-      - LOG_LEVEL=${LOG_LEVEL}
+      POSTGRES_DB: telegram_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
     ports:
-      - "8501:8501"   # web.py
-      - "8502:8502"   # 后台.py（如需要单独开）
+      - "5432:5432"
     volumes:
-      - ./:/app:ro
-    command: bash -lc "streamlit run web.py --server.port 8501 --server.address 0.0.0.0"
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
 
-  # 如你已有数据库，这里不再创建 PostgreSQL 服务。
-  # 如果未来需要内置数据库，可取消注释以下块。
-  # db:
-  #   image: postgres:14
-  #   container_name: tg-db
-  #   restart: unless-stopped
-  #   environment:
-  #     POSTGRES_USER: ${POSTGRES_USER}
-  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-  #     POSTGRES_DB: ${POSTGRES_DB}
-  #   ports:
-  #     - "5432:5432"
-  #   volumes:
-  #     - ./pgdata:/var/lib/postgresql/data
+volumes:
+  postgres_data:

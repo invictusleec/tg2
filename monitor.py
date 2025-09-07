@@ -364,6 +364,52 @@ def upsert_message_by_links(session: Session, parsed_data: dict, timestamp: date
     print("✅ 新消息已保存（无重复链接）")
     return "inserted"
 
+# === 严格网盘链接白名单提取与频道署名清洗 ===
+STRICT_NETDISK_PATTERNS = {
+    "百度网盘": r"https://pan\.baidu\.com/s/[A-Za-z0-9_-]+(?:\?pwd=[A-Za-z0-9]+)?",
+    "夸克网盘": r"https://pan\.quark\.cn/s/[A-Za-z0-9_-]+",
+    "阿里云盘": r"https://www\.aliyundrive\.com/s/[A-Za-z0-9_-]+",
+    "115网盘": r"https://115\.com/s/[A-Za-z0-9_-]+",
+    "迅雷网盘": r"https://pan\.xunlei\.com/s/[A-Za-z0-9_-]+(?:\?pwd=[A-Za-z0-9]+)?(?:#)?",
+    "UC网盘": r"https://drive\.uc\.cn/s/[A-Za-z0-9]+(?:\?public=1)?",
+    "123网盘": r"https://www\.123pan\.com/s/[A-Za-z0-9_-]+(?:\?pwd=[A-Za-z0-9]+)?|https://www\.123684\.com/s/[A-Za-z0-9_-]+(?:\?pwd=[A-Za-z0-9]+)?",
+    "天翼云盘": r"https://cloud\.189\.cn/t/[A-Za-z0-9]+",
+    "移动云盘": r"https://caiyun\.139\.com/w/i/[A-Za-z0-9]+",
+}
+
+ALLOWED_NETDISK_NAMES = set(STRICT_NETDISK_PATTERNS.keys())
+
+def extract_netdisk_links_strict(text: str) -> dict:
+    links = {}
+    for name, pattern in STRICT_NETDISK_PATTERNS.items():
+        matches = re.findall(pattern, text)
+        if matches:
+            # 123网盘有两个域名，若命中多个，取第一个
+            links[name] = matches[0] if isinstance(matches, list) else matches
+    return links
+
+# 去除尾部或独立行中的频道/群组/推广署名等噪声
+_NOISE_LINES = re.compile(r"^(?:[\uD800-\uDBFF\uDC00-\uDFFF\U00010000-\U0010ffff\W]{0,3})\s*(?:来自|来 自|频道|频 道|群组|群 组|投稿|搜资源)\s*[:：].*$", re.IGNORECASE)
+_HANDLE = re.compile(r"@\w+")
+
+def clean_channel_noise(text: str) -> str:
+    lines = [ln for ln in (text or '').split('\n')]
+    cleaned = []
+    for ln in lines:
+        lns = ln.strip()
+        if not lns:
+            continue
+        # 过滤典型署名行
+        if _NOISE_LINES.match(lns):
+            continue
+        # 去掉散落的 @handle
+        lns = _HANDLE.sub('', lns)
+        # 清理多余空白
+        lns = re.sub(r"\s{2,}", " ", lns).strip()
+        if lns:
+            cleaned.append(lns)
+    return '\n'.join(cleaned)
+
 async def on_new_message(event):
     # 无重启暂停：如被暂停则直接忽略消息
     if IS_PAUSED:
@@ -394,12 +440,21 @@ async def on_new_message(event):
         print("🧹 已忽略空文本/纯媒体消息（不入库）")
         return
 
-    message = event.raw_text
-    # 在处理新消息处，统一使用UTC时间
+    raw_message = event.raw_text
+    # 清洗频道署名、推广信息
+    message = clean_channel_noise(raw_message)
+    # 在处理新消息处，统一使用北京时间
     timestamp = get_beijing_time()
     
     # 解析消息
     parsed_data = parse_message(message)
+
+    # 使用严格白名单正则重新提取网盘链接
+    strict_links = extract_netdisk_links_strict(message)
+    if not strict_links:
+        print("🚫 非网盘类或不符合白名单规则的消息，已忽略")
+        return
+    parsed_data['links'] = strict_links
 
     # 若解析后无标题、无描述、无链接、无标签，则忽略
     if not any([parsed_data.get('title'), parsed_data.get('description'), parsed_data.get('links'), parsed_data.get('tags')]):
@@ -565,11 +620,14 @@ async def backfill_channel(channel_username: str):
             text = getattr(msg, 'message', None) or getattr(msg, 'raw_text', None)
             if not text or not text.strip():
                 continue
-            parsed = parse_message(text)
-            # 仅保存“关于网盘”的消息（必须包含 links）
-            if not parsed.get('links'):
+            # 清洗 + 严格链接提取
+            message = clean_channel_noise(text)
+            strict_links = extract_netdisk_links_strict(message)
+            if not strict_links:
                 skipped += 1
                 continue
+            parsed = parse_message(message)
+            parsed['links'] = strict_links
             parsed['channel'] = uname
             if should_drop_by_rules(uname, parsed):
                 continue
@@ -580,7 +638,7 @@ async def backfill_channel(channel_username: str):
                     updated += 1
                 else:
                     inserted += 1
-        print(f"⏪ 回溯完成：新增 {inserted} 条，更新 {updated} 条，跳过非网盘 {skipped} 条")
+        print(f"⏪ 回溯完成：新增 {inserted} 条，更新 {updated} 条，跳过非白名单网盘 {skipped} 条")
     except Exception as e:
         print(f"❌ 回溯抓取失败：{e}")
 
