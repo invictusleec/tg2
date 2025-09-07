@@ -86,6 +86,8 @@ if submitted:
             f"DEFAULT_CHANNELS={DEFAULT_CHANNELS}",
             f"RUN_MODE={RUN_MODE}",
         ]
+        # 确保下次重启进入正式模式并启动监控
+        lines.append("SHOW_SETUP=auto")
         if STRING_SESSION:
             lines.append(f"STRING_SESSION={STRING_SESSION}")
         ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
