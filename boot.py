@@ -36,12 +36,26 @@ setup_mode = os.environ.get("SHOW_SETUP", "always").lower()
 if setup_mode not in ("always", "auto", "never"):
     setup_mode = "always"
 
+# 读取平台提供的端口（如 Render/Heroku/自建 PaaS 会注入 PORT）；默认 8501
+WEB_PORT = os.environ.get("PORT", "8501")
+try:
+    int(WEB_PORT)
+except Exception:
+    WEB_PORT = "8501"
+# 后台管理端口可通过 ADMIN_PORT 控制（默认 8502）；部分 PaaS 仅允许暴露单端口，若无法映射请忽略后台端口
+ADMIN_PORT = os.environ.get("ADMIN_PORT", "8502")
+try:
+    int(ADMIN_PORT)
+except Exception:
+    ADMIN_PORT = "8502"
+
 missing = [k for k in REQUIRED if not os.environ.get(k)]
 
 
 def run_setup():
+    # 安装向导页也绑定到 WEB_PORT，确保在仅允许使用 $PORT 的平台上可被健康检查识别
     cmd = [
-        "streamlit", "run", "setup.py", "--server.port", "8501", "--server.address", "0.0.0.0"
+        "streamlit", "run", "setup.py", "--server.port", str(WEB_PORT), "--server.address", "0.0.0.0"
     ]
     subprocess.run(cmd, check=False)
 
@@ -59,17 +73,17 @@ else:
         # 只启动前台 UI（用于调试或轻量模式）
         subprocess.run([
             "bash", "-lc",
-            "streamlit run web.py --server.port 8501 --server.address 0.0.0.0"
+            f"streamlit run web.py --server.port {WEB_PORT} --server.address 0.0.0.0"
         ], check=False)
     else:
-        # 改进：即便 init_db 失败也不阻塞 Web/后台启动，避免 503；init_db 放后台执行
-        # 同时保留监控进程，若数据库暂不可用，监控自身会按逻辑重试/报错
+        # 改进：去掉嵌套子进程与双重后台，确保 wait 能正确阻塞主进程，容器不提前退出
+        # 顺序：init_db（容忍失败，不阻塞）; 并行启动 web/admin/monitor；最后 wait 保持前台
         cmd = (
             "bash -lc \""
-            "(python init_db.py || echo 'init_db failed (non-fatal)') & "
-            "(python monitor.py &> /tmp/monitor.log &) & "
-            "(streamlit run web.py --server.port 8501 --server.address 0.0.0.0 &> /tmp/web.log &) & "
-            "(streamlit run 后台.py --server.port 8502 --server.address 0.0.0.0 &> /tmp/admin.log &) & "
+            "python init_db.py || echo 'init_db failed (non-fatal)'; "
+            f"streamlit run web.py --server.port {WEB_PORT} --server.address 0.0.0.0 &> /tmp/web.log & "
+            f"streamlit run 后台.py --server.port {ADMIN_PORT} --server.address 0.0.0.0 &> /tmp/admin.log & "
+            "python monitor.py &> /tmp/monitor.log & "
             "wait\""
         )
         subprocess.run(cmd, shell=True, check=False)
