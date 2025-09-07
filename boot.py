@@ -62,8 +62,14 @@ else:
             "streamlit run web.py --server.port 8501 --server.address 0.0.0.0"
         ], check=False)
     else:
-        # 启动：初始化 -> 监控 + 前台 + 后台
-        subprocess.run([
-            "bash", "-lc",
-            "python init_db.py && (python monitor.py & streamlit run web.py --server.port 8501 --server.address 0.0.0.0 & streamlit run 后台.py --server.port 8502 --server.address 0.0.0.0 & wait)"
-        ], check=False)
+        # 改进：即便 init_db 失败也不阻塞 Web/后台启动，避免 503；init_db 放后台执行
+        # 同时保留监控进程，若数据库暂不可用，监控自身会按逻辑重试/报错
+        cmd = (
+            "bash -lc \""
+            "(python init_db.py || echo 'init_db failed (non-fatal)') & "
+            "(python monitor.py &> /tmp/monitor.log &) & "
+            "(streamlit run web.py --server.port 8501 --server.address 0.0.0.0 &> /tmp/web.log &) & "
+            "(streamlit run 后台.py --server.port 8502 --server.address 0.0.0.0 &> /tmp/admin.log &) & "
+            "wait\""
+        )
+        subprocess.run(cmd, shell=True, check=False)
