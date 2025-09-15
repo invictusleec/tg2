@@ -13,6 +13,41 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  tg-monitor:
+    image: ghcr.io/${GITHUB_REPOSITORY_OWNER:-your-username}/tg-monitor:latest
+    container_name: tg-monitor007
+    ports:
+      - "8501:8501"  # 前台 Web UI
+      - "8502:8502"  # 后台管理 UI
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/telegram_db
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - STRING_SESSION=${STRING_SESSION:-}
+      - DEFAULT_CHANNELS=${DEFAULT_CHANNELS:-BaiduCloudDisk,tianyirigeng,Aliyun_4K_Movies}
+      - SHOW_SETUP=${SHOW_SETUP:-always}
+      - RUN_MODE=${RUN_MODE:-full}
+      - PORT=8501
+      - ADMIN_PORT=8502
+    volumes:
+      - app_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 volumes:
   postgres_data:
+  app_data:
