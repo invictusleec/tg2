@@ -14,7 +14,7 @@ api_id = settings.TELEGRAM_API_ID
 api_hash = settings.TELEGRAM_API_HASH
 
 # 目标频道用户名（不要带 @）
-target_channel = 'huohuli666'
+target_channel = 'xuexiziliaobaibaoku'
 
 # 输出文件
 output_file = 'kkbdziyuan副本_quark_links_unique.txt'
