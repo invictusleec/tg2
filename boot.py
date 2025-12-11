@@ -78,12 +78,13 @@ else:
     else:
         # 改进：去掉嵌套子进程与双重后台，确保 wait 能正确阻塞主进程，容器不提前退出
         # 顺序：init_db（容忍失败，不阻塞）; 并行启动 web/admin/monitor；最后 wait 保持前台
+        # 注意：移除日志重定向，直接输出到 stdout 以便 docker logs 查看
         cmd = (
             "bash -lc \""
             "python init_db.py || echo 'init_db failed (non-fatal)'; "
-            f"streamlit run web.py --server.port {WEB_PORT} --server.address 0.0.0.0 &> /tmp/web.log & "
-            f"streamlit run 后台.py --server.port {ADMIN_PORT} --server.address 0.0.0.0 &> /tmp/admin.log & "
-            "python monitor.py &> /tmp/monitor.log & "
+            f"streamlit run web.py --server.port {WEB_PORT} --server.address 0.0.0.0 & "
+            f"streamlit run 后台.py --server.port {ADMIN_PORT} --server.address 0.0.0.0 & "
+            "python -u monitor.py & "
             "wait\""
         )
         subprocess.run(cmd, shell=True, check=False)
