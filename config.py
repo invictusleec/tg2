@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     # Docker 环境标识
     DOCKER_ENV: str = "false"
+    STRICT_NETDISK_ONLY: bool = False
 
     class Config:
         env_file = ".env"  # 指定 .env 文件

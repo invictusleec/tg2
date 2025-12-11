@@ -18,6 +18,16 @@ def get_beijing_time():
     """获取当前北京时间"""
     return datetime.datetime.now(BEIJING_TZ).replace(tzinfo=None)
 
+def _check_db_connectivity():
+    try:
+        with Session(engine) as session:
+            _ = session.query(Message.id).limit(1).count()
+            print("🛢️ 数据库连接正常")
+            return True
+    except Exception as e:
+        print(f"❌ 数据库连接失败: {e}")
+        return False
+
 def to_beijing_time(dt):
     """将 datetime 对象转换为北京时间"""
     if dt is None:
@@ -59,6 +69,22 @@ def get_channels():
                     session.add(channel)
             session.commit()
     
+    # 从本地文件获取频道（tg名字.txt，每行一个用户名）
+    try:
+        fname = "tg名字.txt"
+        if os.path.exists(fname):
+            with open(fname, "r", encoding="utf-8") as f:
+                file_channels = [ln.strip().lstrip('@') for ln in f if ln.strip()]
+                channels.update(file_channels)
+            with Session(engine) as session:
+                db_channels = [c.username for c in session.query(Channel).all()]
+                for username in file_channels:
+                    if username not in db_channels:
+                        session.add(Channel(username=username))
+                session.commit()
+    except Exception as e:
+        print(f"⚠️ 读取 tg名字.txt 失败: {e}")
+
     return list(channels)
 
 def get_string_session():
@@ -451,10 +477,42 @@ async def on_new_message(event):
 
     # 使用严格白名单正则重新提取网盘链接
     strict_links = extract_netdisk_links_strict(message)
-    if not strict_links:
-        print("🚫 非网盘类或不符合白名单规则的消息，已忽略")
+
+    # 额外：从 entities 与按钮中提取 URL 并按白名单归类
+    try:
+        extra = {}
+        msg_obj = getattr(event, 'message', None)
+        if msg_obj is not None:
+            ents = getattr(msg_obj, 'entities', None)
+            if ents:
+                for ent in ents:
+                    url = getattr(ent, 'url', None)
+                    if url:
+                        for name, pattern in STRICT_NETDISK_PATTERNS.items():
+                            if re.search(pattern, url):
+                                m = re.search(pattern, url)
+                                if m:
+                                    extra[name] = m.group(0)
+            btns = getattr(msg_obj, 'buttons', None)
+            if btns:
+                for row in btns:
+                    for button in row:
+                        burl = getattr(button, 'url', None)
+                        if burl:
+                            for name, pattern in STRICT_NETDISK_PATTERNS.items():
+                                if re.search(pattern, burl):
+                                    m = re.search(pattern, burl)
+                                    if m:
+                                        extra[name] = m.group(0)
+        if extra:
+            strict_links.update(extra)
+    except Exception as e:
+        print(f"⚠️ 提取按钮/实体链接时出错: {e}")
+
+    if not strict_links and getattr(settings, 'STRICT_NETDISK_ONLY', False):
+        print("🚫 非白名单网盘消息（STRICT_NETDISK_ONLY=true），已忽略")
         return
-    parsed_data['links'] = strict_links
+    parsed_data['links'] = (strict_links or None)
 
     # 若解析后无标题、无描述、无链接、无标签，则忽略
     if not any([parsed_data.get('title'), parsed_data.get('description'), parsed_data.get('links'), parsed_data.get('tags')]):
@@ -584,6 +642,7 @@ async def start_monitoring():
         print("🔗 正在连接到Telegram...")
         await client.start()
         print("✅ Telegram连接成功！")
+        _check_db_connectivity()
         
         # 获取用户信息
         me = await client.get_me()
